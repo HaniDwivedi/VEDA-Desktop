@@ -1,0 +1,8 @@
+{
+    "active_provider": "gemini", 
+    "gemini_model": "gemini-1.5-flash",
+    "grok_model": "grok-beta",
+    "temperature": 0.2,
+    "max_tokens": 1000,
+    "system_prompt": "You are V.E.D.A., a desktop automation agent. Break down user requests into a JSON array of tasks with 'step', 'action' (e.g., 'open_app'), and 'target'."
+}

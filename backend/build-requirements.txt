@@ -1,0 +1,2 @@
+-r requirement.txt
+PyInstaller>=6.13,<7

@@ -1,0 +1,49 @@
+appId: com.veda.desktop
+productName: VEDA Desktop
+directories:
+  buildResources: build
+  output: release
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+extraResources:
+  - from: ../backend/build-output/VEDA-Backend
+    to: backend
+asarUnpack:
+  - resources/**
+win:
+  executableName: VEDA
+  artifactName: VEDA-${version}-Windows.${ext}
+  target:
+    - portable
+nsis:
+  artifactName: VEDA-${version}-Windows-Setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+mac:
+  target:
+    - dmg
+  artifactName: VEDA-${version}-macOS.${ext}
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+  notarize: false
+dmg:
+  artifactName: VEDA-${version}-macOS.${ext}
+linux:
+  target:
+    - AppImage
+    - snap
+    - deb
+  maintainer: electronjs.org
+  category: Utility
+appImage:
+  artifactName: VEDA-${version}-Linux.${ext}
+npmRebuild: false
