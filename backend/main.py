@@ -301,7 +301,7 @@ def startup() -> None:
 
 
 @app.get("/health")
-@app.get("/api/health")
+@app.get("/health")
 async def health() -> dict[str, Any]:
     client = await get_redis_client()
     return {
@@ -313,7 +313,7 @@ async def health() -> dict[str, Any]:
     }
 
 
-@app.post("/api/auth/register")
+@app.post("/auth/register")
 def register_user(payload: RegisterRequest):
     password_hash = hash_password(payload.password)
     conn = get_db_connection()
@@ -337,7 +337,7 @@ def register_user(payload: RegisterRequest):
     return TokenResponse(access_token=token, user_id=user_id, email=payload.email.lower())
 
 
-@app.post("/api/auth/login")
+@app.post("/auth/login")
 def login_user(payload: LoginRequest):
     conn = get_db_connection()
     row = conn.execute("SELECT * FROM users WHERE email = ?", (payload.email.lower(),)).fetchone()
@@ -350,7 +350,7 @@ def login_user(payload: LoginRequest):
     return TokenResponse(access_token=token, user_id=row["id"], email=row["email"])
 
 
-@app.get("/api/auth/me")
+@app.get("/auth/me")
 async def me(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -368,7 +368,7 @@ async def me(
     return {"id": user["id"], "email": user["email"], "full_name": user["full_name"]}
 
 
-@app.post("/api/auth/ws-ticket")
+@app.post("/auth/ws-ticket")
 async def create_websocket_ticket(authorization: str | None = Header(default=None)):
     token = get_bearer_token(authorization)
     user = get_current_user(token)
@@ -379,7 +379,7 @@ async def create_websocket_ticket(authorization: str | None = Header(default=Non
     return {"ticket": ticket, "expires_in": 30}
 
 
-@app.post("/api/desktop/logout")
+@app.post("/desktop/logout")
 async def desktop_logout(request: Request, authorization: str | None = Header(default=None)):
     if not is_loopback_request(request):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Desktop logout must be initiated locally")
@@ -391,7 +391,7 @@ async def desktop_logout(request: Request, authorization: str | None = Header(de
     return {"status": "signed_out"}
 
 
-@app.post("/api/desktop/command")
+@app.post("/desktop/command")
 def desktop_command(
     payload: CommandPayload,
     request: Request,
