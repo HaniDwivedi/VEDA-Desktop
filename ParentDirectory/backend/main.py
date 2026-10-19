@@ -24,7 +24,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocke
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field, SecretStr
 
-
+# --- 🛠️ HEADLESS / GUI SAFETY CHECK ---
 if os.environ.get("DISPLAY"):
     try:
         import pyautogui
@@ -33,7 +33,7 @@ if os.environ.get("DISPLAY"):
         GUI_AVAILABLE = False
 else:
     GUI_AVAILABLE = False
-
+# ----------------------------------------
 
 try:
     import redis.asyncio as redis
@@ -326,4 +326,204 @@ async def health() -> dict[str, Any]:
 
 
 @app.post("/auth/register")
-def register_user(payload:
+def register_user(payload: RegisterRequest):
+    password_hash = hash_password(payload.password)
+    conn = get_db_connection()
+    existing = conn.execute("SELECT id FROM users WHERE email = ?", (payload.email.lower(),)).fetchone()
+    if existing:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    cursor = conn.execute(
+        "INSERT INTO users (email, password_hash, full_name) VALUES (?, ?, ?)",
+        (payload.email.lower(), password_hash, payload.full_name),
+    )
+    user_id = cursor.lastrowid
+    conn.execute(
+        "INSERT INTO devices (user_id, device_name, pairing_token, is_active) VALUES (?, ?, ?, 1)",
+        (user_id, payload.device_name, None),
+    )
+    conn.commit()
+    conn.close()
+    token = encode_token(user_id, payload.email.lower())
+    return TokenResponse(access_token=token, user_id=user_id, email=payload.email.lower())
+
+
+@app.post("/auth/login")
+def login_user(payload: LoginRequest):
+    conn = get_db_connection()
+    row = conn.execute("SELECT * FROM users WHERE email = ?", (payload.email.lower(),)).fetchone()
+    conn.close()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = encode_token(row["id"], row["email"])
+    return TokenResponse(access_token=token, user_id=row["id"], email=row["email"])
+
+
+@app.get("/auth/me")
+async def me(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    client_type: str | None = Header(default=None, alias="X-Veda-Client"),
+):
+    token = get_bearer_token(authorization)
+    user = get_current_user(token)
+    if client_type == "desktop":
+        if not is_loopback_request(request):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Desktop session can only be claimed locally")
+        previous_user_id = session_state["desktop_user_id"]
+        if previous_user_id and previous_user_id != user["id"]:
+            await close_controller_sockets(previous_user_id)
+        session_state["desktop_user_id"] = user["id"]
+    return {"id": user["id"], "email": user["email"], "full_name": user["full_name"]}
+
+
+@app.post("/auth/ws-ticket")
+async def create_websocket_ticket(authorization: str | None = Header(default=None)):
+    token = get_bearer_token(authorization)
+    user = get_current_user(token)
+    if user["id"] != session_state["desktop_user_id"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is not signed in on the desktop")
+    ticket = secrets.token_urlsafe(32)
+    await issue_websocket_ticket(ticket, token)
+    return {"ticket": ticket, "expires_in": 30}
+
+
+@app.post("/desktop/logout")
+async def desktop_logout(request: Request, authorization: str | None = Header(default=None)):
+    if not is_loopback_request(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Desktop logout must be initiated locally")
+    user = get_current_user(get_bearer_token(authorization))
+    if user["id"] != session_state["desktop_user_id"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Desktop account mismatch")
+    session_state["desktop_user_id"] = None
+    await close_controller_sockets(user["id"])
+    return {"status": "signed_out"}
+
+
+@app.post("/desktop/command")
+def desktop_command(
+    payload: CommandPayload,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    if not is_loopback_request(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Desktop commands must be initiated locally")
+    user = get_current_user(get_bearer_token(authorization))
+    if user["id"] != session_state["desktop_user_id"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Desktop account mismatch")
+    api_key = payload.gemini_api_key.get_secret_value() if payload.gemini_api_key else None
+    output = process_agent_command(payload.text, api_key, payload.gemini_model)
+    return {"status": "processed", "result": output, "command": payload.text}
+
+
+@app.websocket("/ws/remote")
+async def remote_websocket(websocket: WebSocket):
+    ticket = websocket.query_params.get("ticket")
+    token = await consume_websocket_ticket(ticket) if ticket else None
+    if not token:
+        await websocket.close(code=4401, reason="Missing or expired ticket")
+        return
+
+    try:
+        user = get_current_user(token)
+    except HTTPException:
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+    if user["id"] != session_state["desktop_user_id"]:
+        await websocket.close(code=4403, reason="No matching desktop session")
+        return
+
+    await websocket.accept()
+    active_controller_sockets.setdefault(user["id"], set()).add(websocket)
+    print(f"SUCCESS: Mobile remote client connected to V.E.D.A. desktop bridge for user {user['email']}")
+    try:
+        await asyncio.gather(screen_streamer(websocket), command_listener(websocket))
+    except WebSocketDisconnect:
+        print("Mobile client disconnected from command listener.")
+    finally:
+        active_controller_sockets.get(user["id"], set()).discard(websocket)
+
+
+async def screen_streamer(websocket: WebSocket):
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        try:
+            while True:
+                start_time = asyncio.get_running_loop().time()
+                screenshot = sct.grab(monitor)
+                img = np.array(screenshot)
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                height, width = img.shape[:2]
+                target_width = 960
+                img_resized = cv2.resize(img, (target_width, int(height * (target_width / width))))
+                _, buffer = cv2.imencode(".jpg", img_resized, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                base64_img = base64.b64encode(buffer).decode("utf-8")
+                await websocket.send_json({"type": "screen_frame", "data": base64_img})
+                elapsed = asyncio.get_running_loop().time() - start_time
+                await asyncio.sleep(max(0, FRAME_DELAY - elapsed))
+        except Exception as exc:
+            print(f"Screen streaming error: {exc}")
+
+
+async def command_listener(websocket: WebSocket):
+    # Safe screen dimensions handling
+    if GUI_AVAILABLE:
+        screen_width, screen_height = pyautogui.size()
+    else:
+        screen_width, screen_height = 1920, 1080  # Fallback default values for cloud
+
+    last_command_at = 0.0
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if len(data) > 4096:
+                await websocket.close(code=4400, reason="Message too large")
+                return
+            message = json.loads(data)
+            if not isinstance(message, dict):
+                continue
+            msg_type = message.get("type")
+
+            if msg_type == "tap":
+                x_pct = float(message.get("x_pct", 0.0))
+                y_pct = float(message.get("y_pct", 0.0))
+                if not (0.0 <= x_pct <= 1.0 and 0.0 <= y_pct <= 1.0):
+                    continue
+                actual_x = int(x_pct * screen_width)
+                actual_y = int(y_pct * screen_height)
+                
+                if GUI_AVAILABLE:
+                    pyautogui.click(x=actual_x, y=actual_y)
+                    print(f"[Action] Clicked desktop at ({actual_x}, {actual_y}) [Pct: {x_pct:.2f}, {y_pct:.2f}]")
+                else:
+                    print(f"[Action Skipped] GUI not available on this environment (Target: {actual_x}, {actual_y})")
+
+            elif msg_type == "command":
+                cmd_text = str(message.get("text", "")).strip()
+                if len(cmd_text) > 2000:
+                    continue
+                now = asyncio.get_running_loop().time()
+                if now - last_command_at < 1.0:
+                    await websocket.send_json({"type": "agent_response", "text": "Please wait before sending another task."})
+                    continue
+                last_command_at = now
+                print(f"[Command Received] {cmd_text}")
+                if cmd_text:
+                    result = process_agent_command(cmd_text)
+                    await websocket.send_json({"type": "agent_response", "text": result})
+
+    except WebSocketDisconnect:
+        print("Mobile client disconnected from command listener.")
+    except Exception as exc:
+        print(f"Command listener error: {exc}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("VEDA_PORT", "8000"))
+    host = os.getenv("VEDA_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port, reload=False)
