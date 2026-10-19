@@ -4,9 +4,16 @@ const path = require('node:path')
 
 const projectRoot = path.resolve(__dirname, '..')
 const backendRoot = path.resolve(projectRoot, '../backend')
-const pythonCommand = process.env.VEDA_PYTHON || (process.platform === 'win32' ? 'py' : 'python3')
-const pythonArgs =
-  process.platform === 'win32' && pythonCommand === 'py' ? ['-3', 'main.py'] : ['main.py']
+
+let pythonCommand = process.env.VEDA_PYTHON || (process.platform === 'win32' ? 'py' : 'python3')
+let pythonArgs = ['main.py']
+
+// GitHub Codespaces / Linux headless environment ke liye xvfb-run wrap karna
+if (process.platform === 'linux') {
+  pythonArgs = ['--auto-servernum', pythonCommand, ...pythonArgs]
+  pythonCommand = 'xvfb-run'
+}
+
 const appDataRoot =
   process.env.LOCALAPPDATA ||
   process.env.XDG_DATA_HOME ||
